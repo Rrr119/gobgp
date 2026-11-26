@@ -32,6 +32,9 @@ Assumed that you finished [Getting Started](getting-started.md).
         - [Examples](#examples-3)
       - [as-path-sets](#as-path-sets)
         - [Examples](#examples-4)
+    - [Source AS and composite matching](#source-as-and-composite-matching)
+    - [Evaluation order, priority, and conflicts](#evaluation-order-priority-and-conflicts)
+    - [Acceptance matrix: 10 policy combinations](#acceptance-matrix-10-policy-combinations)
     - [3. Defining policy-definitions](#3-defining-policy-definitions)
       - [Execution condition of Action](#execution-condition-of-action)
         - [Examples](#examples-5)
@@ -605,6 +608,129 @@ Some examples follow:
     as-path-list = ["[0-9]+_65[0-9]+_65100$"]
   ```
 
+### Source AS and composite matching
+
+Two conditions are provided for filtering a route by both its origin and its
+communities:
+
+- `match-source-as-set` matches the **source AS** of a route. The source AS is
+  the right-most AS in `AS_PATH` (the AS that originated the NLRI). It is not
+  the peer AS; use `match-neighbor-set` when the peer address is the intended
+  match.
+- `match-as-path-community-set` is an atomic composite condition. It matches
+  only when every configured component matches: the `AS_PATH` set, the
+  community set, and (optionally) the source AS list. This avoids having to
+  rely on two independent statements matching in a particular order.
+
+```toml
+[[defined-sets.bgp-defined-sets.as-path-sets]]
+  as-path-set-name = "from-65001"
+  as-path-list = ["^65001_"]
+
+[[defined-sets.bgp-defined-sets.community-sets]]
+  community-set-name = "gold"
+  community-list = ["65001:100"]
+
+[[policy-definitions]]
+  name = "peer-filter"
+  priority = 30
+  [[policy-definitions.statements]]
+    name = "source-community"
+    priority = 250
+    [policy-definitions.statements.conditions.bgp-conditions.match-as-path-community-set]
+      as-path-set = "from-65001"
+      community-set = "gold"
+      source-as-list = [65002]
+      match-set-options = "any"
+    [policy-definitions.statements.actions]
+      route-disposition = "reject-route"
+```
+
+`match-source-as-set`, `match-as-path-community-set`, and the existing
+`match-as-path-set`/`match-community-set` conditions are additive API fields.
+Existing configuration files and clients that do not set them keep their
+original behavior.
+
+#### Composite match-set options
+
+`match-as-path-community-set` has a top-level `match-set-options` value and
+optional per-component overrides:
+
+| Element                         | Description                                                          | Default |
+| ------------------------------- | -------------------------------------------------------------------- | ------- |
+| `as-path-set`                   | Defined AS path set to match                                        | empty   |
+| `community-set`                 | Defined community set to match                                      | empty   |
+| `source-as-list`                | List of origin AS numbers to match                                  | empty   |
+| `match-set-options`             | Default `any`, `all`, or `invert` for every component               | `any`   |
+| `as-path-match-set-options`     | Override for the AS path component                                  | inherited |
+| `community-match-set-options`   | Override for the community component                                | inherited |
+| `source-as-match-set-options`   | Override for the source AS component                                | inherited |
+
+At least one component must be configured. The components are combined with
+logical AND; `invert` inverts only that component, not the whole condition.
+
+### Evaluation order, priority, and conflicts
+
+Policy evaluation is deterministic and first-match-wins:
+
+1. Policies attached to a direction are ordered by descending `priority`.
+2. Policies with equal priority keep the order in which they are referenced by
+   the attachment (`import-policy-list`/`export-policy-list`, the gRPC policy
+   assignment list, or the CLI argument order).
+3. Inside a policy, statements are ordered by descending `priority`.
+4. Statements with equal priority keep declaration order.
+5. The first statement whose conditions all evaluate to true executes its
+   actions. If that action has a route disposition (`accept-route` or
+   `reject-route`), evaluation stops immediately.
+6. If no statement returns a disposition, the next policy is evaluated. If no
+   policy matches, the attachment's default action applies. An attachment with
+   a non-empty policy list and no explicit default implicitly accepts.
+
+The larger the `priority` value, the earlier the object is evaluated. The
+default priority is zero, so existing configurations preserve their original
+order. A conflict between a high-priority permit and a low-priority deny is
+resolved in favor of the high-priority permit; reversing the priorities
+reverses the result.
+
+The evaluation order can be inspected programmatically without evaluating a
+route:
+
+```go
+order := routingPolicy.EvaluationOrder(peerID, table.POLICY_DIRECTION_IMPORT)
+// order[0].Policy is evaluated first; order[0].Statements lists statement order.
+```
+
+`ApplyPolicyWithTrace` returns the same decision plus the ordered policy and
+statement steps, condition results, and whether the attachment default was
+used. This is the authoritative explanation for a conflicting-policy result.
+
+#### Acceptance matrix: 10 policy combinations
+
+The unit test
+`TestTenPolicyCombinationsMatchManualSelection` in
+`internal/pkg/table/policy_composite_test.go` encodes the following manual
+derivation. The route is `192.0.2.0/24` with `AS_PATH=65001 65002` and
+community `65001:100`; therefore `from-65001` (`^65001_`), `gold`
+(`65001:100`), and source AS `65002` all match.
+
+| #  | Policy combination | Evaluation order | Expected selection |
+| -- | ------------------ | ---------------- | ------------------ |
+| 1  | Composite all components match | composite | accept |
+| 2  | Composite but community missing | composite | reject |
+| 3  | Composite but source AS is 65003 | composite | reject |
+| 4  | Composite but AS_PATH does not start with 65001 | composite | reject |
+| 5  | permit priority 20, deny priority 10 | permit, deny | accept |
+| 6  | permit priority 10, deny priority 20 | deny, permit | reject |
+| 7  | both priority 0, referenced permit then deny | permit, deny | accept |
+| 8  | both priority 0, referenced deny then permit | deny, permit | reject |
+| 9  | one policy: deny priority 10, permit priority 20 | permit statement first | accept |
+| 10 | one policy: deny priority 0, permit priority 0 | deny statement first | reject |
+
+Rows 5 through 10 are the conflicting-policy cases. Their order column is
+asserted against `EvaluationOrder`, so a change that silently alters
+first-match order fails the test instead of producing a plausible but
+different route selection.
+
 ### 3. Defining policy-definitions
 
 policy-definitions consists of condition and action. Condition part is used to
@@ -657,12 +783,14 @@ evaluate routes from neighbors, if matched, action will be applied.
   | Element | Description   | Example          |
   | ------- | ------------- | ---------------- |
   | name    | policy's name | "example-policy" |
+  | priority | evaluation priority; larger values run first | 30 |
 
 - policy-definitions.statements
 
   | Element | Description       | Example      |
   | ------- | ----------------- | ------------ |
   | name    | statements's name | "statement1" |
+  | priority | evaluation priority; larger values run first | 250 |
 
 - policy-definitions.statements.conditions.match-prefix-set
 

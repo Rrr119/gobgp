@@ -175,6 +175,8 @@ const (
 	CONDITION_ORIGIN
 	CONDITION_LOCAL_PREF_EQ
 	CONDITION_MED_EQ
+	CONDITION_SOURCE_AS
+	CONDITION_AS_PATH_COMMUNITY
 )
 
 type ActionType int
@@ -2406,6 +2408,198 @@ func NewCommunityCondition(c oc.MatchCommunitySet) (*CommunityCondition, error) 
 	}, nil
 }
 
+// SourceASCondition matches the origin/source AS of a path. The source AS is
+// the right-most AS in the AS_PATH (the AS that originated the NLRI).
+type SourceASCondition struct {
+	list   []uint32
+	option MatchOption
+}
+
+func (c *SourceASCondition) Type() ConditionType {
+	return CONDITION_SOURCE_AS
+}
+
+func (c *SourceASCondition) Set() DefinedSet {
+	return nil
+}
+
+func (c *SourceASCondition) Name() string { return "" }
+
+func (c *SourceASCondition) String() string {
+	return fmt.Sprintf("source-as %v %s", c.list, c.option)
+}
+
+func (c *SourceASCondition) Evaluate(path *Path, _ *PolicyOptions) bool {
+	if len(c.list) == 0 {
+		return true
+	}
+	if path.GetAsPath() == nil {
+		return false
+	}
+	asn := path.GetSourceAs()
+	matched := slices.Contains(c.list, asn)
+	switch c.option {
+	case MATCH_OPTION_INVERT:
+		return !matched
+	case MATCH_OPTION_ALL:
+		for _, n := range c.list {
+			if n != asn {
+				return false
+			}
+		}
+		return true
+	default:
+		return matched
+	}
+}
+
+func NewSourceASCondition(c oc.MatchSourceASSet) (*SourceASCondition, error) {
+	if len(c.SourceASList) == 0 {
+		return nil, nil
+	}
+	o, err := NewMatchOption(c.MatchSetOptions)
+	if err != nil {
+		return nil, err
+	}
+	return &SourceASCondition{
+		list:   slices.Clone(c.SourceASList),
+		option: o,
+	}, nil
+}
+
+// AsPathCommunityCondition is an atomic composite condition. Every configured
+// component (AS_PATH, community, and source AS) must match the path. This makes
+// it possible to express "routes from AS X carrying community Y" without
+// relying on the order in which separate policy statements happen to match.
+type AsPathCommunityCondition struct {
+	asPath    *AsPathCondition
+	community *CommunityCondition
+	sourceAS  *SourceASCondition
+	base      MatchOption
+}
+
+func (c *AsPathCommunityCondition) Type() ConditionType {
+	return CONDITION_AS_PATH_COMMUNITY
+}
+
+// Set returns the first referenced defined set. Use DefinedSets when the caller
+// needs every set referenced by this composite condition.
+func (c *AsPathCommunityCondition) Set() DefinedSet {
+	if c.asPath != nil {
+		return c.asPath.Set()
+	}
+	if c.community != nil {
+		return c.community.Set()
+	}
+	return nil
+}
+
+func (c *AsPathCommunityCondition) DefinedSets() []DefinedSet {
+	sets := make([]DefinedSet, 0, 2)
+	if c.asPath != nil {
+		sets = append(sets, c.asPath.Set())
+	}
+	if c.community != nil {
+		sets = append(sets, c.community.Set())
+	}
+	return sets
+}
+
+func (c *AsPathCommunityCondition) Name() string {
+	if c.asPath != nil {
+		return c.asPath.Name()
+	}
+	if c.community != nil {
+		return c.community.Name()
+	}
+	return ""
+}
+
+func (c *AsPathCommunityCondition) String() string {
+	parts := make([]string, 0, 3)
+	if c.asPath != nil {
+		parts = append(parts, fmt.Sprintf("as-path %s %s", c.asPath.Name(), c.asPath.Option()))
+	}
+	if c.community != nil {
+		parts = append(parts, fmt.Sprintf("community %s %s", c.community.Name(), c.community.Option()))
+	}
+	if c.sourceAS != nil {
+		parts = append(parts, c.sourceAS.String())
+	}
+	return strings.Join(parts, " and ")
+}
+
+func (c *AsPathCommunityCondition) Evaluate(path *Path, options *PolicyOptions) bool {
+	if c.asPath != nil && !c.asPath.Evaluate(path, options) {
+		return false
+	}
+	if c.community != nil && !c.community.Evaluate(path, options) {
+		return false
+	}
+	if c.sourceAS != nil && !c.sourceAS.Evaluate(path, options) {
+		return false
+	}
+	return true
+}
+
+func matchOptionFromConfig(c oc.MatchSetOptionsType, fallback MatchOption) (MatchOption, error) {
+	if c == "" {
+		return fallback, nil
+	}
+	return NewMatchOption(c)
+}
+
+func NewAsPathCommunityCondition(c oc.MatchAsPathCommunitySet) (*AsPathCommunityCondition, error) {
+	if c.AsPathSet == "" && c.CommunitySet == "" && len(c.SourceASList) == 0 {
+		return nil, nil
+	}
+	base, err := NewMatchOption(c.MatchSetOptions)
+	if err != nil {
+		return nil, err
+	}
+	cc := &AsPathCommunityCondition{base: base}
+	if c.AsPathSet != "" {
+		o, err := matchOptionFromConfig(c.AsPathMatchSetOptions, base)
+		if err != nil {
+			return nil, err
+		}
+		cc.asPath, err = NewAsPathCondition(oc.MatchAsPathSet{
+			AsPathSet:       c.AsPathSet,
+			MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(o)],
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if c.CommunitySet != "" {
+		o, err := matchOptionFromConfig(c.CommunityMatchSetOptions, base)
+		if err != nil {
+			return nil, err
+		}
+		cc.community, err = NewCommunityCondition(oc.MatchCommunitySet{
+			CommunitySet:    c.CommunitySet,
+			MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(o)],
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(c.SourceASList) != 0 {
+		o, err := matchOptionFromConfig(c.SourceASMatchSetOptions, base)
+		if err != nil {
+			return nil, err
+		}
+		cc.sourceAS, err = NewSourceASCondition(oc.MatchSourceASSet{
+			SourceASList:    c.SourceASList,
+			MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(o)],
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return cc, nil
+}
+
 type ExtCommunityCondition struct {
 	set    *ExtCommunitySet
 	option MatchOption
@@ -3606,9 +3800,30 @@ func NewNexthopAction(c oc.BgpNextHopType) (*NexthopAction, error) {
 
 type Statement struct {
 	Name        string
+	Priority    int32
 	Conditions  []Condition
 	RouteAction Action
 	ModActions  []Action
+}
+
+func sortStatementsByPriority(stmts []*Statement) {
+	sort.SliceStable(stmts, func(i, j int) bool {
+		return stmts[i].Priority > stmts[j].Priority
+	})
+}
+
+type ConditionTrace struct {
+	Type    ConditionType
+	Name    string
+	Matched bool
+}
+
+type StatementTrace struct {
+	Policy     string
+	Name       string
+	Priority   int32
+	Matched    bool
+	Conditions []ConditionTrace
 }
 
 // evaluate each condition in the statement according to MatchSetOptions
@@ -3621,38 +3836,65 @@ func (s *Statement) Evaluate(p *Path, options *PolicyOptions) bool {
 	return true
 }
 
-func (s *Statement) Apply(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path) {
-	result := s.Evaluate(path, options)
-	if result {
-		if len(s.ModActions) != 0 {
-			// apply all modification actions
-			path = path.Clone(path.IsWithdraw)
-			for _, action := range s.ModActions {
-				var err error
-				path, err = action.Apply(path, options)
-				if err != nil {
-					logger.Warn("action failed",
-						slog.String("Topic", "policy"),
-						slog.String("Error", err.Error()))
-				}
+func (s *Statement) EvaluateTrace(p *Path, options *PolicyOptions) (bool, []ConditionTrace) {
+	traces := make([]ConditionTrace, 0, len(s.Conditions))
+	matched := true
+	for _, c := range s.Conditions {
+		ok := c.Evaluate(p, options)
+		traces = append(traces, ConditionTrace{Type: c.Type(), Name: c.Name(), Matched: ok})
+		if !ok {
+			matched = false
+			break
+		}
+	}
+	return matched, traces
+}
+
+func (s *Statement) applyMatched(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path) {
+	if len(s.ModActions) != 0 {
+		// apply all modification actions
+		path = path.Clone(path.IsWithdraw)
+		for _, action := range s.ModActions {
+			var err error
+			path, err = action.Apply(path, options)
+			if err != nil {
+				logger.Warn("action failed",
+					slog.String("Topic", "policy"),
+					slog.String("Error", err.Error()))
 			}
 		}
-		// Routing action
-		if s.RouteAction == nil || reflect.ValueOf(s.RouteAction).IsNil() {
-			return ROUTE_TYPE_NONE, path
-		}
-		p, _ := s.RouteAction.Apply(path, options)
-		if p == nil {
-			return ROUTE_TYPE_REJECT, path
-		}
-		return ROUTE_TYPE_ACCEPT, path
+	}
+	// Routing action
+	if s.RouteAction == nil || reflect.ValueOf(s.RouteAction).IsNil() {
+		return ROUTE_TYPE_NONE, path
+	}
+	p, _ := s.RouteAction.Apply(path, options)
+	if p == nil {
+		return ROUTE_TYPE_REJECT, path
+	}
+	return ROUTE_TYPE_ACCEPT, path
+}
+
+func (s *Statement) Apply(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path) {
+	if s.Evaluate(path, options) {
+		return s.applyMatched(logger, path, options)
 	}
 	return ROUTE_TYPE_NONE, path
 }
 
+func (s *Statement) ApplyWithTrace(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path, []ConditionTrace) {
+	matched, traces := s.EvaluateTrace(path, options)
+	if matched {
+		result, p := s.applyMatched(logger, path, options)
+		return result, p, traces
+	}
+	return ROUTE_TYPE_NONE, path, traces
+}
+
 func (s *Statement) ToConfig() *oc.Statement {
 	return &oc.Statement{
-		Name: s.Name,
+		Name:     s.Name,
+		Priority: s.Priority,
 		Conditions: func() oc.Conditions {
 			cond := oc.Conditions{}
 			for _, c := range s.Conditions {
@@ -3669,6 +3911,31 @@ func (s *Statement) ToConfig() *oc.Statement {
 					cond.BgpConditions.MatchAsPathSet = oc.MatchAsPathSet{AsPathSet: v.set.Name(), MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(v.option)]}
 				case *CommunityCondition:
 					cond.BgpConditions.MatchCommunitySet = oc.MatchCommunitySet{CommunitySet: v.set.Name(), MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(v.option)]}
+				case *SourceASCondition:
+					cond.BgpConditions.MatchSourceASSet = oc.MatchSourceASSet{SourceASList: slices.Clone(v.list), MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(v.option)]}
+				case *AsPathCommunityCondition:
+					c := oc.MatchAsPathCommunitySet{
+						MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(v.base)],
+					}
+					if v.asPath != nil {
+						c.AsPathSet = v.asPath.Name()
+						if v.asPath.Option() != v.base {
+							c.AsPathMatchSetOptions = oc.IntToMatchSetOptionsTypeMap[int(v.asPath.Option())]
+						}
+					}
+					if v.community != nil {
+						c.CommunitySet = v.community.Name()
+						if v.community.Option() != v.base {
+							c.CommunityMatchSetOptions = oc.IntToMatchSetOptionsTypeMap[int(v.community.Option())]
+						}
+					}
+					if v.sourceAS != nil {
+						c.SourceASList = slices.Clone(v.sourceAS.list)
+						if v.sourceAS.option != v.base {
+							c.SourceASMatchSetOptions = oc.IntToMatchSetOptionsTypeMap[int(v.sourceAS.option)]
+						}
+					}
+					cond.BgpConditions.MatchAsPathCommunitySet = c
 				case *ExtCommunityCondition:
 					cond.BgpConditions.MatchExtCommunitySet = oc.MatchExtCommunitySet{ExtCommunitySet: v.set.Name(), MatchSetOptions: oc.IntToMatchSetOptionsTypeMap[int(v.option)]}
 				case *LargeCommunityCondition:
@@ -3898,6 +4165,12 @@ func NewStatement(c oc.Statement) (*Statement, error) {
 			return NewCommunityCondition(c.Conditions.BgpConditions.MatchCommunitySet)
 		},
 		func() (Condition, error) {
+			return NewSourceASCondition(c.Conditions.BgpConditions.MatchSourceASSet)
+		},
+		func() (Condition, error) {
+			return NewAsPathCommunityCondition(c.Conditions.BgpConditions.MatchAsPathCommunitySet)
+		},
+		func() (Condition, error) {
 			return NewExtCommunityCondition(c.Conditions.BgpConditions.MatchExtCommunitySet)
 		},
 		func() (Condition, error) {
@@ -3972,6 +4245,7 @@ func NewStatement(c oc.Statement) (*Statement, error) {
 	}
 	return &Statement{
 		Name:        c.Name,
+		Priority:    c.Priority,
 		Conditions:  cs,
 		RouteAction: ra,
 		ModActions:  as,
@@ -3980,14 +4254,55 @@ func NewStatement(c oc.Statement) (*Statement, error) {
 
 type Policy struct {
 	Name       string
+	Priority   int32
 	Statements []*Statement
+}
+
+func sortPoliciesByPriority(policies []*Policy) {
+	sort.SliceStable(policies, func(i, j int) bool {
+		return policies[i].Priority > policies[j].Priority
+	})
+}
+
+func orderedPolicies(policies []*Policy) []*Policy {
+	for i := 1; i < len(policies); i++ {
+		if policies[i-1].Priority < policies[i].Priority {
+			ps := slices.Clone(policies)
+			sortPoliciesByPriority(ps)
+			return ps
+		}
+	}
+	return policies
+}
+
+func (p *Policy) orderedStatements() []*Statement {
+	for i := 1; i < len(p.Statements); i++ {
+		if p.Statements[i-1].Priority < p.Statements[i].Priority {
+			stmts := slices.Clone(p.Statements)
+			sortStatementsByPriority(stmts)
+			return stmts
+		}
+	}
+	return p.Statements
+}
+
+// EvaluationOrder returns statement names in the order in which they are
+// evaluated. Higher priorities come first; equal priorities keep declaration
+// order.
+func (p *Policy) EvaluationOrder() []string {
+	stmts := p.orderedStatements()
+	order := make([]string, 0, len(stmts))
+	for _, s := range stmts {
+		order = append(order, s.Name)
+	}
+	return order
 }
 
 // Compare path with a policy's condition in stored order in the policy.
 // If a condition match, then this function stops evaluation and
 // subsequent conditions are skipped.
 func (p *Policy) Apply(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path) {
-	for _, stmt := range p.Statements {
+	for _, stmt := range p.orderedStatements() {
 		var result RouteType
 		result, path = stmt.Apply(logger, path, options)
 		if result != ROUTE_TYPE_NONE {
@@ -3997,13 +4312,45 @@ func (p *Policy) Apply(logger *slog.Logger, path *Path, options *PolicyOptions) 
 	return ROUTE_TYPE_NONE, path
 }
 
+type PolicyTrace struct {
+	Policy    string
+	Priority  int32
+	RouteType RouteType
+	Path      *Path
+	Steps     []StatementTrace
+}
+
+func (p *Policy) ApplyWithTrace(logger *slog.Logger, path *Path, options *PolicyOptions) (RouteType, *Path, *PolicyTrace) {
+	trace := &PolicyTrace{Policy: p.Name, Priority: p.Priority, RouteType: ROUTE_TYPE_NONE, Path: path}
+	for _, stmt := range p.orderedStatements() {
+		result, next, conditions := stmt.ApplyWithTrace(logger, path, options)
+		trace.Steps = append(trace.Steps, StatementTrace{
+			Policy:     p.Name,
+			Name:       stmt.Name,
+			Priority:   stmt.Priority,
+			Matched:    len(conditions) == len(stmt.Conditions),
+			Conditions: conditions,
+		})
+		path = next
+		if result != ROUTE_TYPE_NONE {
+			trace.RouteType = result
+			trace.Path = path
+			return result, path, trace
+		}
+	}
+	trace.Path = path
+	return ROUTE_TYPE_NONE, path, trace
+}
+
 func (p *Policy) ToConfig() *oc.PolicyDefinition {
-	ss := make([]oc.Statement, 0, len(p.Statements))
-	for _, s := range p.Statements {
+	stmts := p.orderedStatements()
+	ss := make([]oc.Statement, 0, len(stmts))
+	for _, s := range stmts {
 		ss = append(ss, *s.ToConfig())
 	}
 	return &oc.PolicyDefinition{
 		Name:       p.Name,
+		Priority:   p.Priority,
 		Statements: ss,
 	}
 }
@@ -4018,11 +4365,13 @@ func (p *Policy) FillUp(m map[string]*Statement) error {
 		stmts = append(stmts, y)
 	}
 	p.Statements = stmts
+	sortStatementsByPriority(p.Statements)
 	return nil
 }
 
 func (lhs *Policy) Add(rhs *Policy) error {
 	lhs.Statements = append(lhs.Statements, rhs.Statements...)
+	sortStatementsByPriority(lhs.Statements)
 	return nil
 }
 
@@ -4053,11 +4402,13 @@ func (lhs *Policy) Remove(rhs *Policy) error {
 		}
 	}
 	lhs.Statements = stmts
+	sortStatementsByPriority(lhs.Statements)
 	return nil
 }
 
 func (lhs *Policy) Replace(rhs *Policy) error {
 	lhs.Statements = rhs.Statements
+	sortStatementsByPriority(lhs.Statements)
 	return nil
 }
 
@@ -4084,8 +4435,10 @@ func NewPolicy(c oc.PolicyDefinition) (*Policy, error) {
 			st = append(st, s)
 		}
 	}
+	sortStatementsByPriority(st)
 	return &Policy{
 		Name:       c.Name,
+		Priority:   c.Priority,
 		Statements: st,
 	}, nil
 }
@@ -4118,6 +4471,78 @@ type RoutingPolicy struct {
 	assignmentMap map[string]*Assignment
 	mu            sync.RWMutex
 	logger        *slog.Logger
+}
+
+type PolicyEvaluationOrderEntry struct {
+	Policy     string
+	Priority   int32
+	Statements []string
+}
+
+// EvaluationOrder returns the deterministic policy/statement order used for a
+// direction. Larger priorities come first and ties keep declaration order.
+func (r *RoutingPolicy) EvaluationOrder(id string, dir PolicyDirection) []PolicyEvaluationOrderEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	policies := r.getPolicy(id, dir)
+	order := make([]PolicyEvaluationOrderEntry, 0, len(policies))
+	for _, p := range policies {
+		order = append(order, PolicyEvaluationOrderEntry{
+			Policy:     p.Name,
+			Priority:   p.Priority,
+			Statements: p.EvaluationOrder(),
+		})
+	}
+	return order
+}
+
+type PolicyDecisionTrace struct {
+	RouteType RouteType
+	Path      *Path
+	Accepted  bool
+	Default   bool
+	Policies  []*PolicyTrace
+}
+
+func (r *RoutingPolicy) ApplyPolicyWithTrace(id string, dir PolicyDirection, before *Path, options *PolicyOptions) *PolicyDecisionTrace {
+	if before == nil {
+		return &PolicyDecisionTrace{RouteType: ROUTE_TYPE_REJECT}
+	}
+	if before.IsWithdraw {
+		return &PolicyDecisionTrace{RouteType: ROUTE_TYPE_ACCEPT, Path: before, Accepted: true}
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	trace := &PolicyDecisionTrace{RouteType: ROUTE_TYPE_NONE, Path: before}
+	after := before
+	for _, p := range r.getPolicy(id, dir) {
+		result, next, pt := p.ApplyWithTrace(r.logger, after, options)
+		trace.Policies = append(trace.Policies, pt)
+		after = next
+		if result != ROUTE_TYPE_NONE {
+			trace.RouteType = result
+			trace.Path = after
+			trace.Accepted = result == ROUTE_TYPE_ACCEPT
+			return trace
+		}
+	}
+	result := r.getDefaultPolicy(id, dir)
+	if result == ROUTE_TYPE_NONE && len(r.getPolicy(id, dir)) != 0 {
+		result = ROUTE_TYPE_ACCEPT
+	}
+	trace.RouteType = result
+	trace.Default = true
+	if result == ROUTE_TYPE_ACCEPT {
+		trace.Path = after
+		trace.Accepted = true
+	} else {
+		trace.Path = nil
+		trace.Accepted = false
+	}
+	return trace
 }
 
 func (r *RoutingPolicy) ApplyPolicy(id string, dir PolicyDirection, before *Path, options *PolicyOptions) *Path {
@@ -4164,9 +4589,9 @@ func (r *RoutingPolicy) getPolicy(id string, dir PolicyDirection) []*Policy {
 	}
 	switch dir {
 	case POLICY_DIRECTION_IMPORT:
-		return a.importPolicies
+		return orderedPolicies(a.importPolicies)
 	case POLICY_DIRECTION_EXPORT:
-		return a.exportPolicies
+		return orderedPolicies(a.exportPolicies)
 	default:
 		return nil
 	}
@@ -4192,6 +4617,7 @@ func (r *RoutingPolicy) setPolicy(id string, dir PolicyDirection, policies []*Po
 	if !ok {
 		a = &Assignment{}
 	}
+	sortPoliciesByPriority(policies)
 	switch dir {
 	case POLICY_DIRECTION_IMPORT:
 		a.importPolicies = policies
@@ -4286,6 +4712,24 @@ func (r *RoutingPolicy) validateCondition(v Condition) (err error) {
 			c := v.(*CommunityCondition)
 			c.set = i.(*CommunitySet)
 		}
+	case CONDITION_AS_PATH_COMMUNITY:
+		c := v.(*AsPathCommunityCondition)
+		if c.asPath != nil {
+			m := r.definedSetMap[DEFINED_TYPE_AS_PATH]
+			i, ok := m[c.asPath.Name()]
+			if !ok {
+				return fmt.Errorf("not found as path set %s", c.asPath.Name())
+			}
+			c.asPath.set = i.(*AsPathSet)
+		}
+		if c.community != nil {
+			m := r.definedSetMap[DEFINED_TYPE_COMMUNITY]
+			i, ok := m[c.community.Name()]
+			if !ok {
+				return fmt.Errorf("not found community set %s", c.community.Name())
+			}
+			c.community.set = i.(*CommunitySet)
+		}
 	case CONDITION_EXT_COMMUNITY:
 		m := r.definedSetMap[DEFINED_TYPE_EXT_COMMUNITY]
 		if i, ok := m[v.Name()]; !ok {
@@ -4308,6 +4752,7 @@ func (r *RoutingPolicy) validateCondition(v Condition) (err error) {
 	case CONDITION_RPKI:
 	case CONDITION_LOCAL_PREF_EQ:
 	case CONDITION_MED_EQ:
+	case CONDITION_SOURCE_AS:
 	}
 	return nil
 }
@@ -4317,6 +4762,14 @@ func (r *RoutingPolicy) inUse(d DefinedSet) bool {
 	for _, p := range r.policyMap {
 		for _, s := range p.Statements {
 			for _, c := range s.Conditions {
+				if cs, ok := c.(interface{ DefinedSets() []DefinedSet }); ok {
+					for _, x := range cs.DefinedSets() {
+						if x != nil && x.Name() == name {
+							return true
+						}
+					}
+					continue
+				}
 				if c.Set() != nil && c.Set().Name() == name {
 					return true
 				}
@@ -5071,6 +5524,35 @@ func ToStatementApi(s *oc.Statement) *api.Statement {
 			Name: s.Conditions.BgpConditions.MatchCommunitySet.CommunitySet,
 		}
 	}
+	if len(s.Conditions.BgpConditions.MatchSourceASSet.SourceASList) != 0 {
+		o, _ := NewMatchOption(s.Conditions.BgpConditions.MatchSourceASSet.MatchSetOptions)
+		cs.SourceAsSet = &api.MatchSourceASSet{
+			SourceAsList:    slices.Clone(s.Conditions.BgpConditions.MatchSourceASSet.SourceASList),
+			MatchSetOptions: o.ToApi(),
+		}
+	}
+	if m := s.Conditions.BgpConditions.MatchAsPathCommunitySet; m.AsPathSet != "" || m.CommunitySet != "" || len(m.SourceASList) != 0 {
+		base, _ := NewMatchOption(m.MatchSetOptions)
+		c := &api.MatchAsPathCommunitySet{
+			AsPathSet:       m.AsPathSet,
+			CommunitySet:    m.CommunitySet,
+			SourceAsList:    slices.Clone(m.SourceASList),
+			MatchSetOptions: base.ToApi(),
+		}
+		if m.AsPathMatchSetOptions != "" {
+			o, _ := NewMatchOption(m.AsPathMatchSetOptions)
+			c.AsPathMatchSetOptions = o.ToApi()
+		}
+		if m.CommunityMatchSetOptions != "" {
+			o, _ := NewMatchOption(m.CommunityMatchSetOptions)
+			c.CommunityMatchSetOptions = o.ToApi()
+		}
+		if m.SourceASMatchSetOptions != "" {
+			o, _ := NewMatchOption(m.SourceASMatchSetOptions)
+			c.SourceAsMatchSetOptions = o.ToApi()
+		}
+		cs.AsPathCommunitySet = c
+	}
 	if s.Conditions.BgpConditions.MatchExtCommunitySet.ExtCommunitySet != "" {
 		o, _ := NewMatchOption(s.Conditions.BgpConditions.MatchExtCommunitySet.MatchSetOptions)
 		cs.ExtCommunitySet = &api.MatchSet{
@@ -5258,6 +5740,7 @@ func ToStatementApi(s *oc.Statement) *api.Statement {
 	}
 	return &api.Statement{
 		Name:       s.Name,
+		Priority:   s.Priority,
 		Conditions: cs,
 		Actions:    as,
 	}
@@ -5269,7 +5752,8 @@ func NewAPIPolicyFromTableStruct(p *Policy) *api.Policy {
 
 func ToPolicyApi(p *oc.PolicyDefinition) *api.Policy {
 	return &api.Policy{
-		Name: p.Name,
+		Name:     p.Name,
+		Priority: p.Priority,
 		Statements: func() []*api.Statement {
 			l := make([]*api.Statement, 0)
 			for _, s := range p.Statements {

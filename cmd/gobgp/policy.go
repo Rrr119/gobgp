@@ -113,6 +113,17 @@ func prettyString(v any) string {
 	return "unknown"
 }
 
+func matchSetTypeString(t api.MatchSet_Type) string {
+	switch t {
+	case api.MatchSet_TYPE_ALL:
+		return "all"
+	case api.MatchSet_TYPE_INVERT:
+		return "invert"
+	default:
+		return "any"
+	}
+}
+
 func formatDefinedSet(head bool, typ string, indent int, list []*api.DefinedSet) string {
 	if len(list) == 0 {
 		return "Nothing defined yet\n"
@@ -455,6 +466,9 @@ func printStatement(indent int, s *api.Statement) {
 		return strings.Repeat(" ", indent)
 	}
 	fmt.Printf("%sStatementName %s:\n", sIndent(indent), s.Name)
+	if s.Priority != 0 {
+		fmt.Printf("%sPriority: %d\n", sIndent(indent+2), s.Priority)
+	}
 	fmt.Printf("%sConditions:\n", sIndent(indent+2))
 
 	ind := sIndent(indent + 4)
@@ -471,6 +485,13 @@ func printStatement(indent int, s *api.Statement) {
 	}
 	if c.CommunitySet != nil {
 		fmt.Printf("%sCommunitySet: %s\n", ind, prettyString(c.CommunitySet))
+	}
+	if c.SourceAsSet != nil {
+		fmt.Printf("%sSourceASSet: %v %s\n", ind, c.SourceAsSet.SourceAsList, matchSetTypeString(c.SourceAsSet.MatchSetOptions))
+	}
+	if c.AsPathCommunitySet != nil {
+		fmt.Printf("%sAsPathCommunitySet: as-path %s, community %s, source-as %v\n",
+			ind, c.AsPathCommunitySet.AsPathSet, c.AsPathCommunitySet.CommunitySet, c.AsPathCommunitySet.SourceAsList)
 	}
 	if c.ExtCommunitySet != nil {
 		fmt.Printf("%sExtCommunitySet: %s\n", ind, prettyString(c.ExtCommunitySet))
@@ -545,6 +566,9 @@ func printStatement(indent int, s *api.Statement) {
 }
 
 func printPolicy(indent int, pd *api.Policy) {
+	if pd.Priority != 0 {
+		fmt.Printf("%sPriority: %d\n", strings.Repeat(" ", indent), pd.Priority)
+	}
 	for _, s := range pd.Statements {
 		printStatement(indent, s)
 	}
@@ -653,6 +677,15 @@ func modStatement(op string, args []string) error {
 	stmt := &api.Statement{
 		Name: args[0],
 	}
+	if len(args) == 3 && args[1] == "priority" {
+		priority, err := strconv.ParseInt(args[2], 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid priority %q: %w", args[2], err)
+		}
+		stmt.Priority = int32(priority)
+	} else if len(args) != 1 {
+		return fmt.Errorf("usage: gobgp policy statement %s <name> [priority <value>]", op)
+	}
 	var err error
 	switch op {
 	case cmdAdd:
@@ -670,6 +703,35 @@ func modStatement(op string, args []string) error {
 	return err
 }
 
+func parseSourceASArgs(args []string) ([]uint32, api.MatchSet_Type, error) {
+	option := api.MatchSet_TYPE_ANY
+	if len(args) != 0 {
+		switch strings.ToLower(args[len(args)-1]) {
+		case "any":
+			option = api.MatchSet_TYPE_ANY
+			args = args[:len(args)-1]
+		case "all":
+			option = api.MatchSet_TYPE_ALL
+			args = args[:len(args)-1]
+		case "invert":
+			option = api.MatchSet_TYPE_INVERT
+			args = args[:len(args)-1]
+		}
+	}
+	if len(args) == 0 {
+		return nil, option, fmt.Errorf("at least one AS number is required")
+	}
+	list := make([]uint32, 0, len(args))
+	for _, arg := range args {
+		asn, err := strconv.ParseUint(arg, 10, 32)
+		if err != nil {
+			return nil, option, fmt.Errorf("invalid AS number %q", arg)
+		}
+		list = append(list, uint32(asn))
+	}
+	return list, option, nil
+}
+
 func modCondition(name, op string, args []string) error {
 	stmt := &api.Statement{
 		Name:       name,
@@ -677,7 +739,7 @@ func modCondition(name, op string, args []string) error {
 	}
 	usage := fmt.Sprintf("usage: gobgp policy statement %s %s condition", name, op)
 	if len(args) < 1 {
-		return fmt.Errorf("%s { prefix | neighbor | as-path | community | ext-community | large-community | as-path-length | rpki | route-type | next-hop-in-list | afi-safi-in | local-pref-eq | med-eq }", usage)
+		return fmt.Errorf("%s { prefix | neighbor | as-path | community | source-as | as-path-community | ext-community | large-community | as-path-length | rpki | route-type | next-hop-in-list | afi-safi-in | local-pref-eq | med-eq }", usage)
 	}
 	typ := args[0]
 	args = args[1:]
@@ -762,6 +824,33 @@ func modCondition(name, op string, args []string) error {
 		default:
 			return fmt.Errorf("%s community <set-name> [{ any | all | invert }]", usage)
 		}
+	case "source-as":
+		list, option, err := parseSourceASArgs(args)
+		if err != nil {
+			return fmt.Errorf("%s source-as <asn>... [{ any | all | invert }]: %w", usage, err)
+		}
+		stmt.Conditions.SourceAsSet = &api.MatchSourceASSet{
+			SourceAsList:    list,
+			MatchSetOptions: option,
+		}
+	case "as-path-community":
+		if len(args) < 2 {
+			return fmt.Errorf("%s as-path-community <as-path-set> <community-set> [<source-as>...] [{ any | all | invert }]", usage)
+		}
+		c := &api.MatchAsPathCommunitySet{
+			AsPathSet:       args[0],
+			CommunitySet:    args[1],
+			MatchSetOptions: api.MatchSet_TYPE_ANY,
+		}
+		if len(args) > 2 {
+			list, option, err := parseSourceASArgs(args[2:])
+			if err != nil {
+				return fmt.Errorf("%s as-path-community <as-path-set> <community-set> [<source-as>...] [{ any | all | invert }]: %w", usage, err)
+			}
+			c.SourceAsList = list
+			c.SourceAsMatchSetOptions = option
+		}
+		stmt.Conditions.AsPathCommunitySet = c
 	case "ext-community":
 		stmt.Conditions.ExtCommunitySet = &api.MatchSet{
 			Type: api.MatchSet_TYPE_ANY,
@@ -881,7 +970,7 @@ func modCondition(name, op string, args []string) error {
 		}
 		stmt.Conditions.AfiSafiIn = afiSafisInList
 	default:
-		return fmt.Errorf("%s { prefix | neighbor | as-path | community | ext-community | large-community | as-path-length | rpki | route-type | next-hop-in-list | afi-safi-in }", usage)
+		return fmt.Errorf("%s { prefix | neighbor | as-path | community | source-as | as-path-community | ext-community | large-community | as-path-length | rpki | route-type | next-hop-in-list | afi-safi-in | local-pref-eq | med-eq }", usage)
 	}
 
 	var err error
@@ -1037,16 +1126,26 @@ func modAction(name, op string, args []string) error {
 
 func modPolicy(modtype string, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: gobgp policy %s <name> [<statement name>...]", modtype)
+		return fmt.Errorf("usage: gobgp policy %s <name> [priority <value>] [<statement name>...]", modtype)
 	}
 	name := args[0]
 	args = args[1:]
+	var priority int32
+	if len(args) >= 2 && args[0] == "priority" {
+		v, err := strconv.ParseInt(args[1], 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid priority %q: %w", args[1], err)
+		}
+		priority = int32(v)
+		args = args[2:]
+	}
 	stmts := make([]*api.Statement, 0, len(args))
 	for _, n := range args {
 		stmts = append(stmts, &api.Statement{Name: n})
 	}
 	policy := &api.Policy{
 		Name:       name,
+		Priority:   priority,
 		Statements: stmts,
 	}
 

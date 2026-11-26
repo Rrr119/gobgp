@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid38813",
+  "B": "/home/dev/feedback/uid38813",
+  "sha": "316c17d448073a66c49bafa54dad912173373fe4",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "osrg",
+    "repo": "gobgp",
+    "sha": "316c17d448073a66c49bafa54dad912173373fe4"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "gobgp",
+    "cloneUrl": "https://github.com/Rrr119/gobgp.git"
+  },
+  "at": "2026-11-26T03:08:02.854Z"
+}

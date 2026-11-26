@@ -1197,6 +1197,21 @@ message MedEq {
   uint32 value = 1;
 }
 
+message MatchSourceASSet {
+  repeated uint32 source_as_list = 1;
+  MatchSet.Type match_set_options = 2;
+}
+
+message MatchAsPathCommunitySet {
+  string as_path_set = 1;
+  string community_set = 2;
+  repeated uint32 source_as_list = 3;
+  MatchSet.Type match_set_options = 4;
+  MatchSet.Type as_path_match_set_options = 5;
+  MatchSet.Type community_match_set_options = 6;
+  MatchSet.Type source_as_match_set_options = 7;
+}
+
 message Conditions {
   MatchSet prefix_set = 1;
   MatchSet neighbor_set = 2;
@@ -1219,6 +1234,8 @@ message Conditions {
   OriginType origin = 13;
   LocalPrefEq local_pref_eq = 14;
   MedEq med_eq = 15;
+  MatchSourceASSet source_as_set = 16;
+  MatchAsPathCommunitySet as_path_community_set = 17;
 }
 
 enum RouteAction {
@@ -1285,11 +1302,13 @@ message Statement {
   string name = 1;
   Conditions conditions = 2;
   Actions actions = 3;
+  int32 priority = 4;
 }
 
 message Policy {
   string name = 1;
   repeated Statement statements = 2;
+  int32 priority = 3;
 }
 
 enum PolicyDirection {

@@ -467,9 +467,9 @@ If you want to remove one element(extended community) of ExtCommunitySet, to spe
 
 ```shell
 # mod statement
-% gobgp policy statement { add | del } <statement name>
+% gobgp policy statement { add | del } <statement name> [priority <value>]
 # mod a condition to a statement
-% gobgp policy statement <statement name> { add | del | set } condition { { prefix | neighbor | as-path | community | ext-community | large-community } <set name> [{ any | all | invert }] | as-path-length <len> { eq | ge | le } | rpki { valid | invalid | not-found } | next-hop-in-list <next-hop>[, <next-hop2>, ...] | afi-safi-in { <afi-safi>... } }
+% gobgp policy statement <statement name> { add | del | set } condition { { prefix | neighbor | as-path | community | ext-community | large-community } <set name> [{ any | all | invert }] | source-as <asn>... [{ any | all | invert }] | as-path-community <as-path-set> <community-set> [<asn>...] [{ any | all | invert }] | as-path-length <len> { eq | ge | le } | rpki { valid | invalid | not-found } | next-hop-in-list <next-hop>[, <next-hop2>, ...] | afi-safi-in { <afi-safi>... } }
 # mod an action to a statement
 % gobgp policy statement <statement name> { add | del | set } action { reject | accept | { community | ext-community | large-community } { add | remove | replace } <value>... | med { add | sub | set } <value> | local-pref <value> | as-prepend { <asn> | last-as } <repeat-value> | next-hop { <next-hop> | self | unchanged } }
 # show all statements
@@ -484,7 +484,7 @@ If you want to remove one element(extended community) of ExtCommunitySet, to spe
 
 ```shell
 # mod policy
-% gobgp policy { add | del | set } <policy name> [<statement name>...]
+% gobgp policy { add | del | set } <policy name> [priority <value>] [<statement name>...]
 # show all policies
 % gobgp policy
 # show a specific policy

@@ -1666,6 +1666,44 @@ func newCommunityConditionFromApiStruct(a *api.MatchSet) (*table.CommunityCondit
 	return table.NewCommunityCondition(c)
 }
 
+func toConfigMatchSetOptionOrDefault(a api.MatchSet_Type) oc.MatchSetOptionsType {
+	switch a {
+	case api.MatchSet_TYPE_ANY:
+		return oc.MATCH_SET_OPTIONS_TYPE_ANY
+	case api.MatchSet_TYPE_ALL:
+		return oc.MATCH_SET_OPTIONS_TYPE_ALL
+	case api.MatchSet_TYPE_INVERT:
+		return oc.MATCH_SET_OPTIONS_TYPE_INVERT
+	default:
+		return ""
+	}
+}
+
+func newSourceASConditionFromApiStruct(a *api.MatchSourceASSet) (*table.SourceASCondition, error) {
+	if a == nil || len(a.SourceAsList) == 0 {
+		return nil, nil
+	}
+	return table.NewSourceASCondition(oc.MatchSourceASSet{
+		SourceASList:    a.SourceAsList,
+		MatchSetOptions: toConfigMatchSetOptionOrDefault(a.MatchSetOptions),
+	})
+}
+
+func newAsPathCommunityConditionFromApiStruct(a *api.MatchAsPathCommunitySet) (*table.AsPathCommunityCondition, error) {
+	if a == nil {
+		return nil, nil
+	}
+	return table.NewAsPathCommunityCondition(oc.MatchAsPathCommunitySet{
+		AsPathSet:                a.AsPathSet,
+		CommunitySet:             a.CommunitySet,
+		SourceASList:             a.SourceAsList,
+		MatchSetOptions:          toConfigMatchSetOptionOrDefault(a.MatchSetOptions),
+		AsPathMatchSetOptions:    toConfigMatchSetOptionOrDefault(a.AsPathMatchSetOptions),
+		CommunityMatchSetOptions: toConfigMatchSetOptionOrDefault(a.CommunityMatchSetOptions),
+		SourceASMatchSetOptions:  toConfigMatchSetOptionOrDefault(a.SourceAsMatchSetOptions),
+	})
+}
+
 func newExtCommunityConditionFromApiStruct(a *api.MatchSet) (*table.ExtCommunityCondition, error) {
 	if a == nil {
 		return nil, nil
@@ -1901,6 +1939,12 @@ func newStatementFromApiStruct(a *api.Statement) (*table.Statement, error) {
 				return newCommunityConditionFromApiStruct(a.Conditions.CommunitySet)
 			},
 			func() (table.Condition, error) {
+				return newSourceASConditionFromApiStruct(a.Conditions.SourceAsSet)
+			},
+			func() (table.Condition, error) {
+				return newAsPathCommunityConditionFromApiStruct(a.Conditions.AsPathCommunitySet)
+			},
+			func() (table.Condition, error) {
 				return newExtCommunityConditionFromApiStruct(a.Conditions.ExtCommunitySet)
 			},
 			func() (table.Condition, error) {
@@ -1974,6 +2018,7 @@ func newStatementFromApiStruct(a *api.Statement) (*table.Statement, error) {
 	}
 	return &table.Statement{
 		Name:        a.Name,
+		Priority:    a.Priority,
 		Conditions:  cs,
 		RouteAction: ra,
 		ModActions:  as,
@@ -2044,6 +2089,7 @@ func newPolicyFromApiStruct(a *api.Policy) (*table.Policy, error) {
 	}
 	return &table.Policy{
 		Name:       a.Name,
+		Priority:   a.Priority,
 		Statements: stmts,
 	}, nil
 }

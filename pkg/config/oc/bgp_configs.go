@@ -5950,6 +5950,80 @@ func (lhs *MatchCommunitySet) Equal(rhs *MatchCommunitySet) bool {
 	return true
 }
 
+// struct for container gobgp:match-source-as-set.
+// Match the source (origin) AS of a route. The source AS is the
+// right-most AS in the AS_PATH.
+type MatchSourceASSet struct {
+	// List of source AS numbers.
+	SourceASList []uint32 `mapstructure:"source-as-list" json:"source-as-list,omitempty"`
+	// Optional parameter that governs the behaviour of the match
+	// operation. Allowed values are any, all, and invert.
+	MatchSetOptions MatchSetOptionsType `mapstructure:"match-set-options" json:"match-set-options,omitempty"`
+}
+
+func (lhs *MatchSourceASSet) Equal(rhs *MatchSourceASSet) bool {
+	if lhs == nil || rhs == nil {
+		return false
+	}
+	if lhs.MatchSetOptions != rhs.MatchSetOptions {
+		return false
+	}
+	if len(lhs.SourceASList) != len(rhs.SourceASList) {
+		return false
+	}
+	for i := range lhs.SourceASList {
+		if lhs.SourceASList[i] != rhs.SourceASList[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// struct for container gobgp:match-as-path-community-set.
+// Atomically match AS_PATH, communities, and optionally the source AS.
+// Every configured component must match the route. Component-specific
+// match-set-options override MatchSetOptions when they are set.
+type MatchAsPathCommunitySet struct {
+	// References a defined AS path set.
+	AsPathSet string `mapstructure:"as-path-set" json:"as-path-set,omitempty"`
+	// References a defined community set.
+	CommunitySet string `mapstructure:"community-set" json:"community-set,omitempty"`
+	// Optional source AS list. The source AS is the right-most AS in
+	// the AS_PATH.
+	SourceASList []uint32 `mapstructure:"source-as-list" json:"source-as-list,omitempty"`
+	// Default match-set-options for all components.
+	MatchSetOptions MatchSetOptionsType `mapstructure:"match-set-options" json:"match-set-options,omitempty"`
+	// Optional per-component override for the AS path set.
+	AsPathMatchSetOptions MatchSetOptionsType `mapstructure:"as-path-match-set-options" json:"as-path-match-set-options,omitempty"`
+	// Optional per-component override for the community set.
+	CommunityMatchSetOptions MatchSetOptionsType `mapstructure:"community-match-set-options" json:"community-match-set-options,omitempty"`
+	// Optional per-component override for the source AS list.
+	SourceASMatchSetOptions MatchSetOptionsType `mapstructure:"source-as-match-set-options" json:"source-as-match-set-options,omitempty"`
+}
+
+func (lhs *MatchAsPathCommunitySet) Equal(rhs *MatchAsPathCommunitySet) bool {
+	if lhs == nil || rhs == nil {
+		return false
+	}
+	if lhs.AsPathSet != rhs.AsPathSet ||
+		lhs.CommunitySet != rhs.CommunitySet ||
+		lhs.MatchSetOptions != rhs.MatchSetOptions ||
+		lhs.AsPathMatchSetOptions != rhs.AsPathMatchSetOptions ||
+		lhs.CommunityMatchSetOptions != rhs.CommunityMatchSetOptions ||
+		lhs.SourceASMatchSetOptions != rhs.SourceASMatchSetOptions {
+		return false
+	}
+	if len(lhs.SourceASList) != len(rhs.SourceASList) {
+		return false
+	}
+	for i := range lhs.SourceASList {
+		if lhs.SourceASList[i] != rhs.SourceASList[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // struct for container bgp-pol:bgp-conditions.
 // Policy conditions for matching
 // BGP-specific defined sets or comparing BGP-specific
@@ -6004,6 +6078,10 @@ type BgpConditions struct {
 	RpkiValidationResult RpkiValidationResultType `mapstructure:"rpki-validation-result" json:"rpki-validation-result,omitempty"`
 	// original -> gobgp:match-large-community-set
 	MatchLargeCommunitySet MatchLargeCommunitySet `mapstructure:"match-large-community-set" json:"match-large-community-set,omitempty"`
+	// original -> gobgp:match-source-as-set
+	MatchSourceASSet MatchSourceASSet `mapstructure:"match-source-as-set" json:"match-source-as-set,omitempty"`
+	// original -> gobgp:match-as-path-community-set
+	MatchAsPathCommunitySet MatchAsPathCommunitySet `mapstructure:"match-as-path-community-set" json:"match-as-path-community-set,omitempty"`
 }
 
 func (lhs *BgpConditions) Equal(rhs *BgpConditions) bool {
@@ -6017,6 +6095,12 @@ func (lhs *BgpConditions) Equal(rhs *BgpConditions) bool {
 		return false
 	}
 	if !lhs.MatchAsPathSet.Equal(&(rhs.MatchAsPathSet)) {
+		return false
+	}
+	if !lhs.MatchSourceASSet.Equal(&(rhs.MatchSourceASSet)) {
+		return false
+	}
+	if !lhs.MatchAsPathCommunitySet.Equal(&(rhs.MatchAsPathCommunitySet)) {
 		return false
 	}
 	if lhs.MedEq != rhs.MedEq {
@@ -6238,6 +6322,10 @@ type Statement struct {
 	// original -> rpol:name
 	// name of the policy statement.
 	Name string `mapstructure:"name" json:"name,omitempty"`
+	// Evaluation priority. Statements with a larger priority are
+	// evaluated first. Equal priorities keep their declaration order.
+	// The default value is zero.
+	Priority int32 `mapstructure:"priority" json:"priority,omitempty"`
 	// original -> rpol:conditions
 	// Condition statements for this
 	// policy statement.
@@ -6253,6 +6341,9 @@ func (lhs *Statement) Equal(rhs *Statement) bool {
 		return false
 	}
 	if lhs.Name != rhs.Name {
+		return false
+	}
+	if lhs.Priority != rhs.Priority {
 		return false
 	}
 	if !lhs.Conditions.Equal(&(rhs.Conditions)) {
@@ -6274,6 +6365,11 @@ type PolicyDefinition struct {
 	// Name of the top-level policy definition -- this name
 	//  is used in references to the current policy.
 	Name string `mapstructure:"name" json:"name,omitempty"`
+	// Evaluation priority. Policies with a larger priority are
+	// evaluated first when they are attached to the same neighbor
+	// or to the global RIB. Equal priorities keep the order in
+	// which the policies are referenced. The default value is zero.
+	Priority int32 `mapstructure:"priority" json:"priority,omitempty"`
 	// original -> rpol:statements
 	// Enclosing container for policy statements.
 	Statements []Statement `mapstructure:"statements" json:"statements,omitempty"`
@@ -6284,6 +6380,9 @@ func (lhs *PolicyDefinition) Equal(rhs *PolicyDefinition) bool {
 		return false
 	}
 	if lhs.Name != rhs.Name {
+		return false
+	}
+	if lhs.Priority != rhs.Priority {
 		return false
 	}
 	if len(lhs.Statements) != len(rhs.Statements) {

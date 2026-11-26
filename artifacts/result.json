@@ -1,0 +1,18 @@
+{
+  "uid": "38813",
+  "harness": "Codex CLI",
+  "snapshotUrl": "https://github.com/Rrr119/gobgp/commit/316c17d448073a66c49bafa54dad912173373fe4",
+  "harnessVersion": "codex-cli 0.167.2",
+  "operatingSystem": "Ubuntu 26.04.1 LTS",
+  "operatingSystemCell": [
+    "MacOS/Linux"
+  ],
+  "outputDirectory": "/home/dev/feedback/uid38813",
+  "wslDistro": "Ubuntu-26.04",
+  "B": {
+    "success": false,
+    "canceled": true,
+    "error": "任务已取消",
+    "side": "B"
+  }
+}
